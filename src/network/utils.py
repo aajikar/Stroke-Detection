@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler, Subset
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from strokenet import StrokeNet
+from strokenet import StrokeNet, StrokeNetV2
 from joblib import Parallel, delayed
 
 def sliding_window(data, seq_length, label):
@@ -61,7 +61,7 @@ def train_model(model, dataset, log_dir, k_fold=5):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     num_epochs = 10
     validation_split = 0.2
-    batch_size = 4
+    batch_size = 2
     shuffle_dataset = True
     random_seed = 2021
     num_classes = 3
@@ -546,6 +546,28 @@ class StrokeDataset(Dataset):
 
     # Get item function
     def __getitem__(self, idx):
+        """
+        Get a timeseries sample from the dataset.
+
+        Parameters
+        ----------
+        idx : torch.Tensor, List
+            The sequence index that needs to be acquired. This is the Fine Seq
+            ID in the metadata.
+
+        Returns
+        -------
+        sample : dict
+            Dictionary of sequences of images and associated labels.
+
+            sequence : torch.Tensor
+                Continuous time series of pressure images. The length of the
+                tensor is the specified seq_len.
+            label : torch.Tensor
+                Single label identifying the class of the sequence. There are
+                three classes 0-left, 1-right, 2-no weakness.
+
+        """
         if torch.is_tensor(idx):
             idx = idx.tolist()
         # idx is the fine sequence number
@@ -593,7 +615,7 @@ class StrokeDataset(Dataset):
 
         """
         img_name = df.iloc[index]
-        img = np.memmap(img_name, mode='r', dtype=np.float32, shape=(5664))
+        img = np.memmap(img_name, mode='r', dtype=np.float32, shape=(118, 48))
         return img
 
     def fine_sequence_labels(self):
@@ -776,12 +798,21 @@ class StrokeDataset(Dataset):
             
         pass
 
+
+class XSNDataPreprocessor():
+    """Class to preprocess an incoming pressure data file"""
+    
+
+
+
 if __name__ == '__main__':
+    # torch.backends.cudnn.enabled = False
     root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward')
-    datset = StrokeDataset(root_path, seq_len=600)
+    datset = StrokeDataset(root_path, seq_len=128)
     foo = datset.__getitem__(1)
-    model = StrokeNet(input_dim=5664, seq_len=600, pool='fc')
+    # model = StrokeNet(4, 192, 192, 384, 192, seq_len=128, pool='fc')
+    model= StrokeNetV2(128)
     if torch.cuda.is_available():
         model.cuda()
-    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\FC 10min Seq')
+    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\Conv_bb_10min_fc')
     train_scores, val_scores, model = train_model(model, datset, log_dir)
