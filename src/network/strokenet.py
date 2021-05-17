@@ -360,46 +360,8 @@ class StrokeNet(nn.Module):
     def __init__(self, num_conv_layers=3, *sizes, conv_pool_type='max',
                  pool_size=(12,4), seq_len=600, hidden_dim=256, num_layers=2,
                  fc1_size=512, fc2_size=256, fc3_size=512, fc4_size=3,
-                 pool='last', input_dim=None):
-        """
-        Create the object of type StrokeNet.
-        
-        This is the first version of the StrokeNet. In this version, 
+                 pool='last', input_dim=None, binary=False):
 
-        Parameters
-        ----------
-        num_conv_layers : TYPE, optional
-            DESCRIPTION. The default is 3.
-        *sizes : TYPE
-            DESCRIPTION.
-        conv_pool_type : TYPE, optional
-            DESCRIPTION. The default is 'max'.
-        pool_size : TYPE, optional
-            DESCRIPTION. The default is (12,4).
-        seq_len : TYPE, optional
-            DESCRIPTION. The default is 600.
-        hidden_dim : TYPE, optional
-            DESCRIPTION. The default is 256.
-        num_layers : TYPE, optional
-            DESCRIPTION. The default is 2.
-        fc1_size : TYPE, optional
-            DESCRIPTION. The default is 512.
-        fc2_size : TYPE, optional
-            DESCRIPTION. The default is 256.
-        fc3_size : TYPE, optional
-            DESCRIPTION. The default is 512.
-        fc4_size : TYPE, optional
-            DESCRIPTION. The default is 3.
-        pool : TYPE, optional
-            DESCRIPTION. The default is 'last'.
-        input_dim : TYPE, optional
-            DESCRIPTION. The default is None.
-
-        Returns
-        -------
-        None.
-
-        """
         super(StrokeNet, self).__init__()
         self.num_conv_layers = num_conv_layers
         self.sizes = sizes
@@ -419,6 +381,9 @@ class StrokeNet(nn.Module):
                 input_dim = pool_size[0] * pool_size[1] * 512
             else:
                 input_dim = pool_size[0] * pool_size[1] * sizes[-1]
+
+        if binary:
+            fc4_size = 2
 
         self.lstm = LSTM(input_dim, seq_len, hidden_dim, num_layers)
         self.classifier = classification_head(hidden_dim, fc1_size, fc2_size,
@@ -517,7 +482,7 @@ class StrokeNetV2(nn.Module):
         super(StrokeNetV2, self).__init__()
         self.backbone = BodiesAtRestBackbone()
         self.lstm = LSTM(10*4*192, seq_len)
-        self.classifier = classification_head(256)
+        self.classifier = classification_head(256, fc4_size=2)
         self.pool = nn.Linear(3*seq_len, 3)
         self.activation = nn.Softmax(dim=1)
         
