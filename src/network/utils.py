@@ -19,6 +19,8 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from strokenet import StrokeNet, StrokeNetV2
 from joblib import Parallel, delayed
+import functools
+import time
 
 def sliding_window(data, seq_length, label):
     xs = []
@@ -36,6 +38,17 @@ def sliding_window(data, seq_length, label):
 def min_max_scaler():
     return None
 
+def timer(func):
+        """Print the runtime of the decorated function."""
+        @functools.wraps(func)
+        def wrapper_timer(*args, **kwargs):
+            start_time = time.perf_counter()
+            value = func(*args, **kwargs)
+            end_time = time.perf_counter()
+            run_time = start_time - end_time
+            print(f"Finished {func.__name__!r} in {-run_time:.4f} s")
+            return value
+        return wrapper_timer
 
 # TODO: Dataset class that can be initialized with different sequence length
 # The data is saved as frames. The user specifies sequence length and samples
@@ -53,18 +66,21 @@ def min_max_scaler():
 # Do the sequence length dataset thing with these chunks
 
 
-def train_model(model, dataset, log_dir, k_fold=5):
+def train_model(model, dataset, log_dir, k_fold=5, binary=False):
     # targets should be the label number (not one hot)
     # TODO: Make all the below parameters be changeable
-    loss_fn = nn.CrossEntropyLoss()
-    lr = 1e-3
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    num_epochs = 10
+    loss_fn = nn.BCELoss()
+    lr = 3e-4
+    optimizer = optim.RMSprop(model.parameters(), lr=lr)
+    num_epochs = 50
     validation_split = 0.2
     batch_size = 2
     shuffle_dataset = True
     random_seed = 2021
-    num_classes = 3
+    if binary:
+        num_classes = 2
+    else:
+        num_classes = 3
     
     step = 0
     device = \
@@ -94,14 +110,19 @@ def train_model(model, dataset, log_dir, k_fold=5):
         train_sampler = SubsetRandomSampler(train_indices)
         valid_sampler = SubsetRandomSampler(val_indices)
         
+
         train_loader = DataLoader(dataset,
                                   batch_size=batch_size, 
                                   sampler=train_sampler,
-                                  num_workers=16)
+                                  num_workers=1)
         validation_loader = DataLoader(dataset,
                                        batch_size=batch_size,
                                        sampler=valid_sampler,
-                                       num_workers=16)
+                                       num_workers=1)
+        # Update the current log dir for the k fold
+                
+        writer = SummaryWriter(log_dir=str(log_dir))
+        
     else:
         total_size = len(dataset)
         
@@ -156,9 +177,9 @@ def train_model(model, dataset, log_dir, k_fold=5):
             val_set = Subset(dataset,val_indices)
             
             train_loader = DataLoader(train_set, batch_size=batch_size,
-                                      shuffle=True, num_workers=16)
+                                      shuffle=True, num_workers=1)
             validation_loader = DataLoader(val_set, batch_size=batch_size,
-                                           shuffle=True, num_workers=16)
+                                           shuffle=True, num_workers=1)
         
 
         for epoch in range(num_epochs):
@@ -206,8 +227,11 @@ def train_model(model, dataset, log_dir, k_fold=5):
             else:
                 val_scores[j]['F1'].at[i] = 0
         
-        save_model(model, optimizer, train_params, num_epochs-1, current_log_dir)
-        
+        if k_fold == 1:
+            save_model(model, optimizer, train_params, num_epochs-1, log_dir)
+        else:
+            save_model(model, optimizer, train_params, num_epochs-1, current_log_dir)
+
         torch.cuda.empty_cache()
         
     return train_scores, val_scores, model
@@ -272,7 +296,7 @@ def train_step(model, optimizer, loss_function, train_loader, device,
         
         one_hot_target = torch.tensor(one_hot_target)
         
-        loss = loss_function(y_pred, target.type(torch.LongTensor).to(device))
+        loss = loss_function(y_pred, one_hot_target.type(torch.float32).to(device))
         
         metric = calculate_metrics(one_hot_target, y_pred, num_classes, metric)
         
@@ -510,15 +534,22 @@ def save_model(model, optimizer, TRAIN_PARAMS, epoch, log_dir):
 
 
 class StrokeDataset(Dataset):
-    def __init__(self, root_path, seq_len=120):
+    @timer
+    def __init__(self, root_path, seq_len=120, drop_no_patient=False,
+                 binary=False, viz='1D'):
         self.metadata_path = root_path / 'metadata.csv'
         self.seq_len = seq_len
         self.metadata = pd.read_csv(self.metadata_path)
         # self.update_metadata()
+        if drop_no_patient:
+            self.remove_no_patient_data()
+        if binary:
+            self.drop_no_weakness_patients()
         self.drop_smaller_sequences()
         self.fine_sequence_labels()
         self.remove_partial_sequences()
         self.transform = None
+        self.viz = viz
 
     def __len__(self):
         """
@@ -544,6 +575,7 @@ class StrokeDataset(Dataset):
         # For each seq len find how many samples
         return len(self.metadata.groupby('Fine Seq ID'))
 
+    @timer
     # Get item function
     def __getitem__(self, idx):
         """
@@ -615,7 +647,11 @@ class StrokeDataset(Dataset):
 
         """
         img_name = df.iloc[index]
-        img = np.memmap(img_name, mode='r', dtype=np.float32, shape=(118, 48))
+        if self.viz == '1D':
+            img = np.memmap(img_name, mode='r', dtype=np.float32, shape=(5664))
+        else:
+            img = np.memmap(img_name, mode='r', dtype=np.float32,
+                            shape=(118, 48))
         return img
 
     def fine_sequence_labels(self):
@@ -651,6 +687,7 @@ class StrokeDataset(Dataset):
     # Create a main metadata file that combines all the metadata from the other
     # files
     # TODO: Fix this function so that it doesn't append to end of file
+    @timer
     def update_metadata(self):
         if self.metadata_path.exists():
             # Read the csv
@@ -667,6 +704,7 @@ class StrokeDataset(Dataset):
         # Save the updated metadata file
         self.metadata.to_csv(self.metadata_path, index=False)
     
+    @timer
     def check_subset(self, flist):
         for file in flist:
             if file is not self.metadata_path:
@@ -688,6 +726,7 @@ class StrokeDataset(Dataset):
                     self.metadata = pd.concat(frames)
         return None
 
+    @timer
     def find_sequences(self):
         """
         Find the number and length of continuos sequences in a dataframe.
@@ -756,6 +795,7 @@ class StrokeDataset(Dataset):
         self.df['Seq ID'] = temp_arr
         return None
     
+    @timer
     # Optional function to drop sequences that are smaller than self.seq_len
     def drop_smaller_sequences(self):
         # Group the sequences by pateint ID
@@ -770,6 +810,7 @@ class StrokeDataset(Dataset):
 
         return None
     
+    @timer
     def remove_partial_sequences(self):
         self.metadata = self.metadata[self.metadata.groupby('Fine Seq ID')['Frame'].transform('size') >= self.seq_len]
         return None
@@ -797,22 +838,229 @@ class StrokeDataset(Dataset):
             pres_arr = np.load(df['Filename'][0])
             
         pass
+    
+    @timer
+    def remove_no_patient_data(self):
+        self.metadata.drop(self.metadata[self.metadata['No Patient'] == True].index, inplace=True)
+        self.metadata.drop(['Garbage'], axis=1, inplace=True)
+        self.metadata = self.metadata.astype({"Label": int})
 
-
+    @timer
+    def drop_no_weakness_patients(self):
+        self.metadata.drop(self.metadata[self.metadata['Label'] == 2].index, inplace=True)
+    
 class XSNDataPreprocessor():
     """Class to preprocess an incoming pressure data file"""
-    
+    def __init__(self, df):
+        self.df = df
 
+    def get_patient_id(self):
+        """
+        
+
+        Returns
+        -------
+        None.
+
+        """
+        assert len(self.df.columns) == 7, "Data is not raw, it has extra columns"
+        # Get the patient id from the file name
+        id_num = int(Path(self.df['Filename'].at[0]).parents[1].stem[1:])
+        # Add a column to df called Patient ID
+        self.df['Patient ID'] = id_num
+        return None
+
+    def assign_seq_id(self, thresh=5):
+        sequences = self.find_sequences()
+        seq_num = 0
+        temp_arr = None
+        for seq in sequences:
+            if temp_arr is None:
+                temp_arr = np.zeros(seq)
+            else:
+                temp_arr = np.concatenate((temp_arr,
+                                          np.zeros(seq)+seq_num))
+            seq_num += 1
+        self.df['Seq ID'] = temp_arr
+        return None
+        
+    def find_sequences(self):
+        """
+        Find the number and length of continuos sequences in a dataframe.
+
+        Returns
+        -------
+        seq_len : list
+            List of sequences in the dataframe. The length of the list is the
+            number of sequences and the index represents the number of frames
+            in each sequence.
+
+        """
+        # Given a dataframe with the metadata of the pressure frames
+        # Separate the frames out into continuos segments
+        # There are time when the mattress is not recording because patient is
+        # no longer on the mattress.
+        seq_len = []
+        for row in range(len(self.df['Datetime'])):
+            self.df['Datetime'][row] = datetime.strptime(self.df['Datetime'][row],
+                                                    "%Y-%m-%d %H:%M:%S")
+        # Get a list of the timedeltas
+        delta = (self.df['Datetime']-self.df['Datetime'].shift())
+        # Find the values where delta is not 1 second
+        num = 1  # Running counter; the first seq will have len=1
+        for i in range(1, len(delta)):
+            if delta[i].seconds >= 5:
+                # Append to seq_len the number of frames in the seq
+                seq_len.append(num)
+                # Reset the number to 0
+                num = 1
+            else:
+                num += 1
+        seq_len.append(num)
+        return seq_len
+
+    def assign_label(self, label):
+        self.df['Label'] = label
+        return None
+
+    @timer
+    def add_metadata(self, label, thresh=5):
+        self.get_patient_id()
+        self.assign_seq_id(thresh)
+        self.assign_label(label)
+        return None
+
+    def save_df(self, filename):
+        self.df.to_csv(filename, index=False)
+        return None
+
+    @timer
+    def add_no_patient_label(self, lower_thresh=0.2, upper_thresh=0.85):
+        # Create a list for no patient labels
+        no_pat_lab = []
+        # List of for garbage data
+        garbage_lab = []
+        # Open each file individually
+        for file in list(self.df['Filename']):
+            arr = np.load(file)
+            # Apply threshold of 0.07
+            arr[arr < 0.07] = 0
+            if np.count_nonzero(arr) <= (arr.shape[0] * arr.shape[1] * lower_thresh):
+                no_pat_lab.append(True)
+            else:
+                no_pat_lab.append(False)
+            if np.count_nonzero(arr) >= (arr.shape[0] * arr.shape[1] * upper_thresh):
+                garbage_lab.append(True)
+            else:
+                garbage_lab.append(False)
+        self.df['No Patient'] = no_pat_lab
+        self.df['Garbage'] = garbage_lab
+        return None
+
+    @timer
+    def add_no_patient_label_parallel(self, lower_thresh=0.2, upper_thresh=0.85):
+        # Create a list for no patient labels
+        self.no_pat_lab = []
+        # List of for garbage data
+        self.garbage_lab = []
+        no_pat_lab = Parallel(n_jobs=1)(delayed(self.check_garbage_or_no_patient)(file, lower_thresh, upper_thresh) for file in list(self.df['Filename']))
+        self.df['No Patient'] = no_pat_lab
+        # self.df['Garbage'] = garbage_lab
+        return None
+    
+    def check_garbage_or_no_patient(self, file, low=0.2, high=0.85):
+        arr = np.load(file)
+        arr[arr < 0.07] = 0
+        if np.count_nonzero(arr) <= (arr.shape[0] * arr.shape[1] * low):
+            no_pat_lab = True
+        else:
+            no_pat_lab = False
+        if np.count_nonzero(arr) >= (arr.shape[0] * arr.shape[1] * high):
+            garbage_lab = True
+        else:
+            garbage_lab = False
+        return no_pat_lab
+
+@timer
+# Function to time how long it takes to pull out a sample from dataloader
+def time_dataloader(dataset):
+    # Initialise dataset
+    sample_loader =  DataLoader(dataset, batch_size=2, num_workers=16)
+    i = 0
+    for sample in sample_loader:
+        assign_sequence(sample)
+        i += 1
+        if i > 1:
+            break
+    return None
+
+
+@timer
+# Function to setup the dataloader
+def setup_dataloader(dataset):
+    sample_loader =  DataLoader(dataset, batch_size=2, num_workers=1)
+    return sample_loader
+
+
+@timer
+# Function to get next item in dataloader
+def get_next_item(dataloader):
+    return next(dataloader)
+
+
+@timer
+# Function to call in one sample at a time
+def time_dataloader_v2(dataset):
+    sample_loader = setup_dataloader(dataset)
+    foo = make_iterable(sample_loader)
+    for _ in range(100):
+        get_next_item(foo)
+    return None
+
+
+@timer
+# Function to assign sequence
+def assign_sequence(sample):
+    sequence = sample['sequence']
+    return sequence
+
+@timer
+# make a dataloader into an iterable
+def make_iterable(dataloader):
+    return iter(dataloader)
+
+
+
+class IterableStrokeDataset(Dataset):
+    
+    def __init__(self,root_path, seq_len=120, drop_no_patient=False,
+                 binary=False, viz='1D'):
+        pass
 
 
 if __name__ == '__main__':
     # torch.backends.cudnn.enabled = False
+    binary = True
     root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward')
-    datset = StrokeDataset(root_path, seq_len=128)
+    datset = StrokeDataset(root_path, seq_len=600, binary=binary, viz='1D')
     foo = datset.__getitem__(1)
-    # model = StrokeNet(4, 192, 192, 384, 192, seq_len=128, pool='fc')
-    model= StrokeNetV2(128)
-    if torch.cuda.is_available():
-        model.cuda()
-    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\Conv_bb_10min_fc')
-    train_scores, val_scores, model = train_model(model, datset, log_dir)
+    
+    # Code for testing how long it takes to load one sample
+    # root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p002')
+    # dataset = StrokeDataset(root_path, seq_len=128)
+    # time_dataloader_v2(dataset)
+    
+    # model = StrokeNet(num_conv_layers=0, input_dim=5664, seq_len=3600, pool='fc', binary=binary)
+    # # model= StrokeNetV2(256)
+    # if torch.cuda.is_available():
+    #     model.cuda()
+    # log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\Binary_1h_fc_50Epochs')
+    # train_scores, val_scores, model = train_model(model, datset, log_dir, k_fold=1, binary=binary)
+    
+    # Code for getting the new data prepped
+    # filename = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p025\metadata.csv')
+    # df = pd.read_csv(filename)
+    # df = XSNDataPreprocessor(df)
+    # df.add_metadata(1)
+    # df.add_no_patient_label_parallel()
+    # df.save_df(filename)
