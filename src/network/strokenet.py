@@ -208,7 +208,7 @@ class backbone(nn.Module):
     """Class for testing out different sizes of backbones."""
 
     def __init__(self, num_conv_layers, *sizes, pool_type='max',
-                 pool_size=(12,4)):
+                 pool_size=(4,12)):
         """
         Initialize the backbone with specified number of layers and sizes.
 
@@ -239,7 +239,7 @@ class backbone(nn.Module):
             The size of the pooling layer. Since a 2D pooling is applied the
             size must be a tuple of two numbers. The first number is the height
             and the second number is the width. If only one number is given the
-            pool size will be of a square shape. The default is (12,4).
+            pool size will be of a square shape. The default is (4,12).
 
         Raises
         ------
@@ -417,7 +417,7 @@ class StrokeNet(nn.Module):
             x = x.transpose(0, 2)  # Tranpose first and third axes
             x = x.transpose(0, 1)  # Transpose first and second axes
             x = self.pool(x)
-            x = x.squeeze()
+            x = x.squeeze(-1)
         elif self.pool_type == 'fc':
             x = x.transpose(0, 1)  # Transpose first and second axes
             x = x.reshape(x.shape[0], -1)  # Vectorize each batch
