@@ -69,12 +69,12 @@ def timer(func):
 def train_model(model, dataset, log_dir, k_fold=5, binary=False):
     # targets should be the label number (not one hot)
     # TODO: Make all the below parameters be changeable
-    loss_fn = nn.BCELoss()
-    lr = 3e-4
-    optimizer = optim.RMSprop(model.parameters(), lr=lr)
-    num_epochs = 50
+    loss_fn = nn.CrossEntropyLoss()
+    lr = 1e-4
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    num_epochs = 10
     validation_split = 0.2
-    batch_size = 2
+    batch_size = 1
     shuffle_dataset = True
     random_seed = 2021
     if binary:
@@ -114,11 +114,11 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
         train_loader = DataLoader(dataset,
                                   batch_size=batch_size, 
                                   sampler=train_sampler,
-                                  num_workers=1)
+                                  num_workers=16)
         validation_loader = DataLoader(dataset,
                                        batch_size=batch_size,
                                        sampler=valid_sampler,
-                                       num_workers=1)
+                                       num_workers=16)
         # Update the current log dir for the k fold
                 
         writer = SummaryWriter(log_dir=str(log_dir))
@@ -177,9 +177,9 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
             val_set = Subset(dataset,val_indices)
             
             train_loader = DataLoader(train_set, batch_size=batch_size,
-                                      shuffle=True, num_workers=1)
+                                      shuffle=True, num_workers=16)
             validation_loader = DataLoader(val_set, batch_size=batch_size,
-                                           shuffle=True, num_workers=1)
+                                           shuffle=True, num_workers=16)
         
 
         for epoch in range(num_epochs):
@@ -296,7 +296,7 @@ def train_step(model, optimizer, loss_function, train_loader, device,
         
         one_hot_target = torch.tensor(one_hot_target)
         
-        loss = loss_function(y_pred, one_hot_target.type(torch.float32).to(device))
+        loss = loss_function(y_pred, target.type(torch.long).to(device))
         
         metric = calculate_metrics(one_hot_target, y_pred, num_classes, metric)
         
@@ -575,7 +575,7 @@ class StrokeDataset(Dataset):
         # For each seq len find how many samples
         return len(self.metadata.groupby('Fine Seq ID'))
 
-    @timer
+    # @timer
     # Get item function
     def __getitem__(self, idx):
         """
@@ -651,7 +651,7 @@ class StrokeDataset(Dataset):
             img = np.memmap(img_name, mode='r', dtype=np.float32, shape=(5664))
         else:
             img = np.memmap(img_name, mode='r', dtype=np.float32,
-                            shape=(118, 48))
+                            shape=(48, 118))
         return img
 
     def fine_sequence_labels(self):
@@ -1042,7 +1042,7 @@ if __name__ == '__main__':
     # torch.backends.cudnn.enabled = False
     binary = True
     root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward')
-    datset = StrokeDataset(root_path, seq_len=600, binary=binary, viz='1D')
+    datset = StrokeDataset(root_path, seq_len=240, binary=binary, viz='1D')
     foo = datset.__getitem__(1)
     
     # Code for testing how long it takes to load one sample
@@ -1050,12 +1050,12 @@ if __name__ == '__main__':
     # dataset = StrokeDataset(root_path, seq_len=128)
     # time_dataloader_v2(dataset)
     
-    # model = StrokeNet(num_conv_layers=0, input_dim=5664, seq_len=3600, pool='fc', binary=binary)
-    # # model= StrokeNetV2(256)
-    # if torch.cuda.is_available():
-    #     model.cuda()
-    # log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\Binary_1h_fc_50Epochs')
-    # train_scores, val_scores, model = train_model(model, datset, log_dir, k_fold=1, binary=binary)
+    model = StrokeNet(num_conv_layers=0, input_dim=5664, seq_len=240, pool='fc', binary=binary)
+    # model= StrokeNetV2(256)
+    if torch.cuda.is_available():
+        model.cuda()
+    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\binary_4min_fc_10Epochs_all_data')
+    train_scores, val_scores, model = train_model(model, datset, log_dir, k_fold=1, binary=binary)
     
     # Code for getting the new data prepped
     # filename = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p025\metadata.csv')
