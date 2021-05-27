@@ -21,6 +21,7 @@ from strokenet import StrokeNet, StrokeNetV2
 from joblib import Parallel, delayed
 import functools
 import time
+import os
 
 def sliding_window(data, seq_length, label):
     xs = []
@@ -66,11 +67,54 @@ def timer(func):
 # Do the sequence length dataset thing with these chunks
 
 
+def test_model(model, dataset, log_dir, force_binary=False):
+    batch_size = 4
+    shuffle_dataset = True
+    random_seed = 2021
+    if force_binary:
+        num_classes = 2
+    else:
+         num_classes = 3
+    
+    device = \
+        torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+
+    model = model.to(device)
+    
+    dataset_size = len(dataset)
+    indices = list(range(dataset_size))
+    
+    if shuffle_dataset :
+        np.random.seed(random_seed)
+        np.random.shuffle(indices)
+    
+    test_sampler = SubsetRandomSampler(indices)
+    
+    test_loader = DataLoader(dataset, batch_size=batch_size,
+                             sampler=test_sampler, num_workers=16)
+    
+    writer = SummaryWriter(log_dir=str(log_dir))
+    
+    test_scores = [{'Accuracy': pd.Series(),
+                   'Precision': pd.Series(),
+                   'Recall': pd.Series(),
+                   'Specificity': pd.Series(),
+                   'F1': pd.Series()}
+                  for i in range(num_classes)]
+
+    torch.cuda.empty_cache()
+
+    test_results = validation_step(model, test_loader, device, num_classes,
+                                   epoch=1, writer=writer, validation=False)
+
+    return test_results
+
+
 def train_model(model, dataset, log_dir, k_fold=5, binary=False):
     # targets should be the label number (not one hot)
     # TODO: Make all the below parameters be changeable
     loss_fn = nn.CrossEntropyLoss()
-    lr = 1e-4
+    lr = 3e-4
     optimizer = optim.Adam(model.parameters(), lr=lr)
     num_epochs = 10
     validation_split = 0.2
@@ -193,9 +237,8 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
             torch.cuda.empty_cache()
             
             # Perform validation
-            valid_results = validation_step(model, optimizer, loss_fn,
-                                            validation_loader, device, num_classes,
-                                            epoch, writer)
+            valid_results = validation_step(model, validation_loader, device, 
+                                            num_classes, epoch, writer)
             
             torch.cuda.empty_cache()
             # Increment step
@@ -432,8 +475,8 @@ def write_metrics(metric, num_classes, writer, step, loss=None, mode='Train',
     return None
 
 
-def validation_step(model, optimizer, loss_function, valid_loader, device,
-                    num_classes, epoch, writer):
+def validation_step(model, valid_loader, device,
+                    num_classes, epoch, writer, validation=True):
     """
     Perform the validation step in the epoch.
 
@@ -490,10 +533,13 @@ def validation_step(model, optimizer, loss_function, valid_loader, device,
             one_hot_target = torch.tensor(one_hot_target)
 
             # Calculate metrics
-            metric = calculate_metrics(one_hot_target, y_pred, num_classes, metric)
+            metric = calculate_metrics(one_hot_target, y_pred, num_classes,
+                                       metric)
 
             # Write metrics
-            write_metrics(metric, num_classes, writer, step=epoch, mode="Eval")
+            if validation:
+                write_metrics(metric, num_classes, writer, step=epoch,
+                              mode="Eval")
 
     valid_results = [{'accuracy': metric[i]['accuracy'],
                       'precision': metric[i]['precision'],
@@ -1041,9 +1087,9 @@ class IterableStrokeDataset(Dataset):
 if __name__ == '__main__':
     # torch.backends.cudnn.enabled = False
     binary = True
-    root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward')
+    root_path = Path(r'D:\Aakash\Masters\Metadata to Test if LSTM Trains')
     datset = StrokeDataset(root_path, seq_len=240, binary=binary, viz='1D')
-    foo = datset.__getitem__(1)
+    # foo = datset.__getitem__(1)
     
     # Code for testing how long it takes to load one sample
     # root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p002')
@@ -1054,8 +1100,21 @@ if __name__ == '__main__':
     # model= StrokeNetV2(256)
     if torch.cuda.is_available():
         model.cuda()
-    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\binary_4min_fc_10Epochs_all_data')
+    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\binary_4min_fc_10Epochs')
     train_scores, val_scores, model = train_model(model, datset, log_dir, k_fold=1, binary=binary)
+    
+    # Code to test the model
+    test_root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward')
+    list_of_patient_paths = [Path(f.path) for f in os.scandir(test_root_path) if (f.is_dir() and Path(f.path).stem != 'p022' and Path(f.path).stem != 'p027')]
+    
+    patient_test_scores = {}
+    for patient in list_of_patient_paths:
+        test_dataset = StrokeDataset(patient, seq_len=240, binary=binary, viz='1D')
+        patient_test_scores[patient.stem] = test_model(model, test_dataset, 
+                                                       log_dir, force_binary=binary)
+    
+    
+    
     
     # Code for getting the new data prepped
     # filename = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p025\metadata.csv')
