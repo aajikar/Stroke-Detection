@@ -9,6 +9,7 @@ import torch.nn as nn
 from functools import reduce
 import functools
 import time
+from i3d import InceptionI3d
 
 # The input of the incoming data will be n, t where n is the vector of x, y
 # pressure data and t is the number of frames in time
@@ -140,7 +141,7 @@ class classification_head(nn.Module):
     """
 
     def __init__(self, hidden_dim, fc1_size=512, fc2_size=256, fc3_size=512,
-                 fc4_size=3):
+                 fc4_size=3, activation_dim=2):
         """
         Initialize classfication head with four fully connected layers.
 
@@ -177,7 +178,7 @@ class classification_head(nn.Module):
         self.relu1 = nn.ReLU()
         self.relu2 = nn.ReLU()
         self.relu3 = nn.ReLU()
-        self.activation = nn.Softmax(dim=2)
+        self.activation = nn.Softmax(dim=activation_dim)
 
     def forward(self, x):
         """
@@ -541,3 +542,21 @@ class StrokeNetV2(nn.Module):
     # l_method(tup)
     
     # s_method(tup)
+
+
+class StrokeInceptionNet(nn.Module):
+    def __init__(self):
+        super(StrokeInceptionNet, self).__init__()
+        self.backbone = InceptionI3d(num_classes=2, in_channels=3)
+        self.classifier = classification_head(14*2*13, fc4_size=2, activation_dim=1)
+        self.pool = nn.Linear(4, 2)
+        self.activation = nn.Softmax(dim=0)
+    
+    def forward(self, x):
+        x = self.backbone(x)
+        x = x.view(-1, 14*2*13)
+        x = self.classifier(x)
+        x = x.view(-1)  # Vectorize each batch
+        x = self.pool(x)  # Pass it through a fully connected layer
+        x = self.activation(x)
+        return x
