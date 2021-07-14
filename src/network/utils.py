@@ -17,11 +17,15 @@ import torch
 from torch.utils.data import DataLoader, SubsetRandomSampler, Subset
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from strokenet import StrokeNet, StrokeNetV2
+from strokenet import StrokeNet, StrokeNetV2, StrokeInceptionNet
 from joblib import Parallel, delayed
 import functools
 import time
 import os
+from torch.optim.lr_scheduler import StepLR
+from i3d import InceptionI3d
+import scipy.ndimage
+
 
 def sliding_window(data, seq_length, label):
     xs = []
@@ -68,7 +72,7 @@ def timer(func):
 
 
 def test_model(model, dataset, log_dir, force_binary=False):
-    batch_size = 4
+    batch_size = 1
     shuffle_dataset = True
     random_seed = 2021
     if force_binary:
@@ -104,23 +108,29 @@ def test_model(model, dataset, log_dir, force_binary=False):
 
     torch.cuda.empty_cache()
 
-    test_results = validation_step(model, test_loader, device, num_classes,
-                                   epoch=1, writer=writer, validation=False)
+    test_results, y_true, y_pred = validation_step(model, test_loader, device, 
+                                                   num_classes, epoch=1, 
+                                                   writer=writer,
+                                                   validation=False,
+                                                   return_preds=True)
 
-    return test_results
+    return test_results, y_true, y_pred
 
 
-def train_model(model, dataset, log_dir, k_fold=5, binary=False):
+def train_model(model, dataset, log_dir, k_fold=5, binary=False,
+                validation_dataset=None, continue_training=False,
+                current_epoch=None, num_epochs=25, save_every_epoch=False):
     # targets should be the label number (not one hot)
     # TODO: Make all the below parameters be changeable
     loss_fn = nn.CrossEntropyLoss()
     lr = 3e-4
     optimizer = optim.Adam(model.parameters(), lr=lr)
-    num_epochs = 10
+    scheduler = StepLR(optimizer, step_size=7, gamma=0.1)
+    num_epochs = 50
     validation_split = 0.2
     batch_size = 1
     shuffle_dataset = True
-    random_seed = 2021
+    random_seed = 42
     if binary:
         num_classes = 2
     else:
@@ -166,7 +176,13 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
         # Update the current log dir for the k fold
                 
         writer = SummaryWriter(log_dir=str(log_dir))
-        
+
+    elif k_fold == 0:
+        train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=16)
+        assert validation_dataset is not None, "A validation dataset must be manually specified when k_fold is equal to 0"
+        validation_loader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=True, num_workers=16)
+        writer = SummaryWriter(log_dir=str(log_dir))
+
     else:
         total_size = len(dataset)
         
@@ -189,7 +205,11 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
 
     torch.cuda.empty_cache()
 
+    if k_fold == 0:
+        k_fold += 1
+
     for i in range(k_fold):
+        step = 0
         for param in model.parameters():
             param.requires_grad = True
             
@@ -228,17 +248,25 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
 
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch+1} of {num_epochs}\n")
+            
+            scheduler.step()
     
             # Perform training
             train_results, step = train_step(model, optimizer, loss_fn,
                                              train_loader, device, num_classes,
                                              epoch, writer, step)
-            
+
             torch.cuda.empty_cache()
             
             # Perform validation
             valid_results = validation_step(model, validation_loader, device, 
                                             num_classes, epoch, writer)
+            
+            if save_every_epoch:
+                if k_fold == 1 or k_fold == 0:
+                    save_model(model, optimizer, train_params, epoch, log_dir)
+                else:
+                    save_model(model, optimizer, train_params, epoch, current_log_dir)
             
             torch.cuda.empty_cache()
             # Increment step
@@ -270,10 +298,10 @@ def train_model(model, dataset, log_dir, k_fold=5, binary=False):
             else:
                 val_scores[j]['F1'].at[i] = 0
         
-        if k_fold == 1:
-            save_model(model, optimizer, train_params, num_epochs-1, log_dir)
+        if k_fold == 1 or k_fold == 0:
+            save_model(model, optimizer, train_params, num_epochs, log_dir)
         else:
-            save_model(model, optimizer, train_params, num_epochs-1, current_log_dir)
+            save_model(model, optimizer, train_params, num_epochs, current_log_dir)
 
         torch.cuda.empty_cache()
         
@@ -476,7 +504,8 @@ def write_metrics(metric, num_classes, writer, step, loss=None, mode='Train',
 
 
 def validation_step(model, valid_loader, device,
-                    num_classes, epoch, writer, validation=True):
+                    num_classes, epoch, writer, validation=True,
+                    return_preds=False):
     """
     Perform the validation step in the epoch.
 
@@ -517,6 +546,8 @@ def validation_step(model, valid_loader, device,
 
     # Set to no grad
     with torch.no_grad():
+        all_preds = None
+        all_targets = None
         for sample in tqdm(valid_loader):
             sequence = sample['sequence']
             target = sample['label']
@@ -540,12 +571,25 @@ def validation_step(model, valid_loader, device,
             if validation:
                 write_metrics(metric, num_classes, writer, step=epoch,
                               mode="Eval")
+            
+            if return_preds:
+                if all_preds is None:
+                    all_preds = y_pred.cpu()
+                    all_targets = target.cpu()
+                else:
+                    all_preds = torch.cat((all_preds, y_pred.cpu()))
+                    all_targets = torch.cat((all_targets, target.cpu()))
+                    
 
     valid_results = [{'accuracy': metric[i]['accuracy'],
                       'precision': metric[i]['precision'],
                       'recall': metric[i]['recall'],
                       'specificity': metric[i]['specificity']}
                      for i in range(num_classes)]
+    
+    if return_preds:
+        return valid_results, all_targets, all_preds
+    
     return valid_results
 
 
@@ -582,7 +626,7 @@ def save_model(model, optimizer, TRAIN_PARAMS, epoch, log_dir):
 class StrokeDataset(Dataset):
     @timer
     def __init__(self, root_path, seq_len=120, drop_no_patient=False,
-                 binary=False, viz='1D'):
+                 binary=False, viz='1D', rolling_window=False):
         self.metadata_path = root_path / 'metadata.csv'
         self.seq_len = seq_len
         self.metadata = pd.read_csv(self.metadata_path)
@@ -596,6 +640,7 @@ class StrokeDataset(Dataset):
         self.remove_partial_sequences()
         self.transform = None
         self.viz = viz
+        self.rw = rolling_window
 
     def __len__(self):
         """
@@ -619,6 +664,7 @@ class StrokeDataset(Dataset):
         # So have to iterate through each patient
         # Within each patient identify each seq len
         # For each seq len find how many samples
+        
         return len(self.metadata.groupby('Fine Seq ID'))
 
     # @timer
@@ -659,6 +705,9 @@ class StrokeDataset(Dataset):
         # Reshape the array to have batch size first
         # seq_of_img = np.expand_dims(seq_of_img, axis=0)
         
+        # Stack the array to mimic 3 channels 
+        # seq_of_img = np.repeat(seq_of_img, 3, axis=0)
+        
         # Get the labels
         label = df['Label']
         
@@ -673,7 +722,8 @@ class StrokeDataset(Dataset):
             sample = self.transform(sample)
         
         return sample
-    
+
+
     # Function to load in numpy array from metadata file
     def load_array(self, df, index):
         """
@@ -698,6 +748,7 @@ class StrokeDataset(Dataset):
         else:
             img = np.memmap(img_name, mode='r', dtype=np.float32,
                             shape=(48, 118))
+            # img = scipy.ndimage.zoom(img, 5)
         return img
 
     def fine_sequence_labels(self):
@@ -888,7 +939,7 @@ class StrokeDataset(Dataset):
     @timer
     def remove_no_patient_data(self):
         self.metadata.drop(self.metadata[self.metadata['No Patient'] == True].index, inplace=True)
-        self.metadata.drop(['Garbage'], axis=1, inplace=True)
+        # self.metadata.drop(['Garbage'], axis=1, inplace=True)
         self.metadata = self.metadata.astype({"Label": int})
 
     @timer
@@ -911,7 +962,7 @@ class XSNDataPreprocessor():
         """
         assert len(self.df.columns) == 7, "Data is not raw, it has extra columns"
         # Get the patient id from the file name
-        id_num = int(Path(self.df['Filename'].at[0]).parents[1].stem[1:])
+        id_num = int(Path(self.df['Filename'].at[0]).parents[1].stem[1:4])
         # Add a column to df called Patient ID
         self.df['Patient ID'] = id_num
         return None
@@ -1085,41 +1136,62 @@ class IterableStrokeDataset(Dataset):
 
 
 if __name__ == '__main__':
-    # torch.backends.cudnn.enabled = False
+    # # torch.backends.cudnn.enabled = False
     binary = True
-    root_path = Path(r'D:\Aakash\Masters\Metadata to Test if LSTM Trains')
-    datset = StrokeDataset(root_path, seq_len=240, binary=binary, viz='1D')
-    # foo = datset.__getitem__(1)
+    root_path = Path(r'D:\Aakash\Masters\Binary\Train')
+    datset = StrokeDataset(root_path, seq_len=360, binary=binary,
+                            drop_no_patient=True, viz='1D')
+    foo = datset.__getitem__(1)
     
-    # Code for testing how long it takes to load one sample
-    # root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p002')
-    # dataset = StrokeDataset(root_path, seq_len=128)
-    # time_dataloader_v2(dataset)
+    valid_root_path = Path(r'D:\Aakash\Masters\Binary\Validation')
+    valid_dataset = StrokeDataset(valid_root_path, seq_len=360, binary=binary,
+                                  drop_no_patient=True, viz='1D')
     
-    model = StrokeNet(num_conv_layers=0, input_dim=5664, seq_len=240, pool='fc', binary=binary)
-    # model= StrokeNetV2(256)
-    if torch.cuda.is_available():
-        model.cuda()
-    log_dir = Path(r'C:\Users\BTLab\Documents\Aakash\Stroke Classification\binary_4min_fc_10Epochs')
-    train_scores, val_scores, model = train_model(model, datset, log_dir, k_fold=1, binary=binary)
+    # # Code for testing how long it takes to load one sample
+    # # root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p002')
+    # # dataset = StrokeDataset(root_path, seq_len=128)
+    # # time_dataloader_v2(dataset)
     
-    # Code to test the model
-    test_root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward')
-    list_of_patient_paths = [Path(f.path) for f in os.scandir(test_root_path) if (f.is_dir() and Path(f.path).stem != 'p022' and Path(f.path).stem != 'p027')]
+    # model = StrokeNet(num_conv_layers=0, input_dim=5664, seq_len=360, pool='fc', binary=binary)
+    # # model = StrokeInceptionNet()
+    # model.load_state_dict(torch.load(r"E:\Models\dropout_0.7_6min_every_epoch\0000000047.tar")['model'])
+    # # model= StrokeNetV2(256)
+    # if torch.cuda.is_available():
+    #     model.cuda()
+    # log_dir = Path(r'E:\Models\dropout_0.7_6min_every_epoch')
+    # train_scores, val_scores, model = train_model(model, datset, log_dir,
+    #                                               k_fold=0, binary=binary,
+    #                                               validation_dataset=valid_dataset,
+    #                                               save_every_epoch=True)
     
-    patient_test_scores = {}
-    for patient in list_of_patient_paths:
-        test_dataset = StrokeDataset(patient, seq_len=240, binary=binary, viz='1D')
-        patient_test_scores[patient.stem] = test_model(model, test_dataset, 
-                                                       log_dir, force_binary=binary)
+    # # Code to test the model
+    # test_root_path = Path(r'D:\Aakash\Masters\Stroke Patient Metadata')
+    # list_of_patient_paths = [Path(f.path) for f in os.scandir(test_root_path) if (f.is_dir() and Path(f.path).stem != 'p012' and Path(f.path).stem != 'p003' and Path(f.path).stem != 'p008' and Path(f.path).stem != 'p015')]
     
+    # patient_test_scores = {}
+    # patient_preds = {}
+    # patient_targets = {}
+    # for patient in list_of_patient_paths:
+    #     test_dataset = StrokeDataset(patient, seq_len=360, binary=binary, drop_no_patient=True, viz='1D')
+    #     test_results, y_true, y_pred = test_model(model, test_dataset, log_dir,
+    #                                               force_binary=binary)
+    #     patient_test_scores[patient.stem] = test_results
+    #     patient_preds[patient.stem] = y_pred
+    #     patient_targets[patient.stem] = y_true
+        
     
+    # fig, ax = plt.subplots(figsize=(16, 12))
+    # plot_roc(y_true, y_pred, title='ROC Curves for testing data in the LSTM model with step decaying learning rate scheduler 4min long sequences, with low initial learning rate', ax=ax)
     
+    #        10,10,11,12,13,14,14,15,16,17,18,18,19,20,21,22,23,24,25,26
+    # labels = [2, 2, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 1]
+    # i = 0
     
-    # Code for getting the new data prepped
-    # filename = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p025\metadata.csv')
-    # df = pd.read_csv(filename)
-    # df = XSNDataPreprocessor(df)
-    # df.add_metadata(1)
-    # df.add_no_patient_label_parallel()
-    # df.save_df(filename)
+    # # Code for getting the new data prepped
+    # for fn in list(Path(r'D:\Aakash\Masters\Stroke Patient Data').glob('**/*.csv')):
+    #     df = pd.read_csv(fn)
+    #     df = XSNDataPreprocessor(df)
+    #     df.add_metadata(labels[i])
+    #     df.add_no_patient_label_parallel()
+    #     df.save_df(fn)
+    #     i += 1
