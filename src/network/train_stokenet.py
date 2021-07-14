@@ -9,6 +9,12 @@ from strokenet import StrokeNet
 from skorch import NeuralNetClassifier
 import torch
 from utils import StrokeDataset
+from sklearn.metrics import make_scorer
+import numpy as np
+
+
+def accuracy_argmax(y_true, y_pred):
+    return np.mean(y_true = np.argmax(y_pred, -1))
 
 
 def train_strokenet():
@@ -16,6 +22,7 @@ def train_strokenet():
                       pool='fc')
     lr = 3e-4
     root_path = 'some_path'
+    accuracy_argmax_scorer = make_scorer(accuracy_argmax)
     net = NeuralNetClassifier(model,
                               optimizer=torch.optim.Adam(model.parameters(),
                                                          lr=lr),
