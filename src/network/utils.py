@@ -25,7 +25,7 @@ import os
 from torch.optim.lr_scheduler import StepLR
 from i3d import InceptionI3d
 import scipy.ndimage
-
+from RollingWindow import CreateRollingWindow as rw
 
 def sliding_window(data, seq_length, label):
     xs = []
@@ -635,9 +635,12 @@ class StrokeDataset(Dataset):
             self.remove_no_patient_data()
         if binary:
             self.drop_no_weakness_patients()
-        self.drop_smaller_sequences()
-        self.fine_sequence_labels()
-        self.remove_partial_sequences()
+        if rolling_window:
+            self.create_rolling_window()
+        else:
+            self.drop_smaller_sequences()
+            self.fine_sequence_labels()
+            self.remove_partial_sequences()
         self.transform = None
         self.viz = viz
         self.rw = rolling_window
@@ -664,7 +667,8 @@ class StrokeDataset(Dataset):
         # So have to iterate through each patient
         # Within each patient identify each seq len
         # For each seq len find how many samples
-        
+        if self.rw:
+            return len(self.indexed_rw)        
         return len(self.metadata.groupby('Fine Seq ID'))
 
     # @timer
@@ -694,9 +698,16 @@ class StrokeDataset(Dataset):
         """
         if torch.is_tensor(idx):
             idx = idx.tolist()
-        # idx is the fine sequence number
-        indices = np.unique(self.metadata['Fine Seq ID'])
-        df = self.metadata[self.metadata['Fine Seq ID'] == indices[idx]]
+            
+        if self.rw:
+            # figure out how to get frames from self.metadata
+            # create a dataframe of indexes within self.indexed_rw[idx]
+            df = self.metadata.iloc[self.indexed_rw[idx]]
+
+        else:    
+            # idx is the fine sequence number
+            indices = np.unique(self.metadata['Fine Seq ID'])
+            df = self.metadata[self.metadata['Fine Seq ID'] == indices[idx]]
         
         seq_of_img = Parallel(n_jobs=1)(delayed(self.load_array)(df['Filename'], index) for index in range(len(df['Filename'])))
         
@@ -945,7 +956,10 @@ class StrokeDataset(Dataset):
     @timer
     def drop_no_weakness_patients(self):
         self.metadata.drop(self.metadata[self.metadata['Label'] == 2].index, inplace=True)
-    
+
+    def create_rolling_window(self):
+        self.indexed_rw = rw(self.metadata, self.seq_len)
+        
 class XSNDataPreprocessor():
     """Class to preprocess an incoming pressure data file"""
     def __init__(self, df):
@@ -1145,7 +1159,7 @@ if __name__ == '__main__':
     
     valid_root_path = Path(r'D:\Aakash\Masters\Binary\Validation')
     valid_dataset = StrokeDataset(valid_root_path, seq_len=360, binary=binary,
-                                  drop_no_patient=True, viz='1D')
+                                  drop_no_patient=True, viz='1D', rolling_window=True)
     
     # # Code for testing how long it takes to load one sample
     # # root_path = Path(r'C:\Users\BTLab\Documents\Aakash\Patient Data from Stroke Ward\p002')
